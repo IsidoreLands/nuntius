@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Nuntius Ferrocell Visual</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.js"></script>
+    <style>
+        body { margin: 0; background: black; }
+        canvas { display: block; }
+        #sextet { color: white; position: absolute; top: 10px; left: 10px; font-family: 'Times New Roman', serif; }
+    </style>
+</head>
+<body>
+    <div id="sextet"></div>
+    <script>
+        const socket = io();
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+        // Toroid with ferrofluid shader
+        const toroidGeometry = new THREE.TorusGeometry(10, 3, 16, 100);
+        const toroidMaterial = new THREE.ShaderMaterial({
+            uniforms: {
+                time: { value: 0.0 },
+                amplitude: { value: 0.0 }
+            },
+            vertexShader: `
+                varying vec2 vUv;
+                void main() {
+                    vUv = uv;
+                    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                }
+            `,
+            fragmentShader: `
+                uniform float time;
+                uniform float amplitude;
+                varying vec2 vUv;
+                void main() {
+                    vec2 uv = vUv;
+                    float ferrofluid = sin(uv.x * 10.0 + time) * cos(uv.y * 10.0 + time) * 0.1;
+                    vec3 color = vec3(0.0, 0.5 + ferrofluid + amplitude * 0.01, 0.5);
+                    gl_FragColor = vec4(color, 0.8);
+                }
+            `,
+            transparent: true
+        });
+        const toroid = new THREE.Mesh(toroidGeometry, toroidMaterial);
+        scene.add(toroid);
+        // Lasers
+        const laserMaterial = new THREE.LineBasicMaterial({ color: 0x00ffff });
+        const laser1Points = [new THREE.Vector3(0, 0, 0), new THREE.Vector3(15, 0, 0)];
+        const laser1 = new THREE.Line(new THREE.BufferGeometry().setFromPoints(laser1Points), laserMaterial);
+        scene.add(laser1);
+        const laser2Points = [new THREE.Vector3(0, 0, 0), new THREE.Vector3(-15, 0, 0)];
+        const laser2 = new THREE.Line(new THREE.BufferGeometry().setFromPoints(laser2Points), laserMaterial);
+        scene.add(laser2);
+        camera.position.z = 30;
+        let time = 0;
+        function animate() {
+            requestAnimationFrame(animate);
+            time += 0.01;
+            toroidMaterial.uniforms.time.value = time;
+            toroid.rotation.x += 0.005;
+            toroid.rotation.y += 0.005;
+            renderer.render(scene, camera);
+        }
+        animate();
+        socket.on('simulation_update', function(data) {
+            document.getElementById('sextet').innerHTML = `Sextet: R=${data.sextet.resistance.toExponential(2)}, C=${data.sextet.capacitance.toFixed(2)}, M=${data.sextet.magnetism.toFixed(2)}, P=${data.sextet.permeability.toFixed(2)}, Pt=${data.sextet.permittivity.toFixed(2)}, D=${data.sextet.dielectricity.toFixed(2)}, Laser=${data.sextet.laser.toFixed(2)}`;
+        });
+        socket.on('perturbation', function(data) {
+            toroid.scale.set(1 + data.amp * 0.005, 1 + data.amp * 0.005, 1 + data.amp * 0.005);
+            toroidMaterial.uniforms.amplitude.value = data.amp;
+            document.getElementById('sextet').innerHTML = `Sextet: R=${data.sextet.resistance.toExponential(2)}, C=${data.sextet.capacitance.toFixed(2)}, M=${data.sextet.magnetism.toFixed(2)}, P=${data.sextet.permeability.toFixed(2)}, Pt=${data.sextet.permittivity.toFixed(2)}, D=${data.sextet.dielectricity.toFixed(2)}, Laser=${data.sextet.laser.toFixed(2)}`;
+        });
+    </script>
+</body>
+</html>

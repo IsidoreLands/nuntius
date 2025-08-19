@@ -1,0 +1,11 @@
+flask
+flask-socketio
+pynostr
+websockets
+ecdsa
+bech32
+python-dotenv
+numpy
+opencv-python
+rich
+cryptography
