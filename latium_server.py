@@ -13,7 +13,8 @@ from flask import Flask, render_template
 from flask_socketio import SocketIO
 
 # Import AetherOS and Nostr components
-from hyperboloid.hyperboloid_aether_os import Contextus
+sys.path.append(os.path.join(os.path.dirname(__file__), 'ferrocella/hyperboloid'))
+from hyperboloid_aether_os import Contextus
 from pynostr.key import PrivateKey
 from pynostr.event import Event
 from bech32 import bech32_decode, convertbits

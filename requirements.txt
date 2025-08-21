@@ -1,11 +1,21 @@
+# Core Web and Simulation Dependencies
 flask
 flask-socketio
-pynostr
-websockets
-ecdsa
-bech32
-python-dotenv
 numpy
 opencv-python
+jax[cpu]
+
+# Aether & Animus Dependencies
+aiohttp
+torch
+torchvision
+torchaudio
+
+# Nostr Client Dependencies
+pynostr
+python-dotenv
+websockets
+
+# UI and Utility Dependencies
 rich
-cryptography
+bech32
