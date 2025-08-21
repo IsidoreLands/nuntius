@@ -170,6 +170,8 @@ def main_simulation_loop():
                 'permittivity': focused_materia.permittivity,
                 'dielectricity': focused_materia.dielectricity
             }
+            # Convert all numpy types to standard Python floats for JSON compatibility
+            sextet_data = {k: float(v) for k, v in sextet_data_raw.items()}
 
             # 3. Emit state to the web visualizer via WebSocket
             socketio.emit('simulation_update', {
