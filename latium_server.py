@@ -95,27 +95,38 @@ def run_nostr_listener_in_thread():
 
 async def broadcast_state_to_nostr(sextet_data):
     """The 'Mouth': Publishes the current sextet state to Nostr."""
-    content = {
-        "source": "latium_server",
-        "timestamp": int(time.time()),
-        "sextet": sextet_data
-    }
-    event = Event(
-        kind=1,
-        pubkey=private_key.public_key.hex(),
-        content=json.dumps(content),
-        tags=[["t", "ferrocella-v1"]] # Tag for clients to find the data stream
-    )
-    event.sign(private_key.hex())
-    
-    for relay in RELAYS:
-        try:
-            async with websockets.connect(relay, open_timeout=5) as ws:
-                await ws.send(json.dumps(['EVENT', event.to_json()]))
-                print(f"-> Broadcasted state to {relay}")
-                break # Broadcast to one relay is enough for it to propagate
-        except Exception as e:
-            print(f"-> Could not broadcast state to {relay}: {e}")
+    try:
+        content = {
+            "source": "latium_server",
+            "timestamp": int(time.time()),
+            "sextet": sextet_data
+        }
+        event = Event(
+            kind=1,
+            pubkey=private_key.public_key.hex(),
+            content=json.dumps(content),
+            tags=[["t", "ferrocella-v1"]]
+        )
+        event.sign(private_key.hex())
+
+        # Ensure the event object is valid before proceeding
+        if not isinstance(event, Event) or not hasattr(event, 'to_json'):
+            print("-> Error: Failed to create a valid Nostr event object.")
+            return
+
+        message = json.dumps(['EVENT', event.to_json()])
+
+        for relay in RELAYS:
+            try:
+                async with websockets.connect(relay, open_timeout=5) as ws:
+                    await ws.send(message)
+                    # Optional: uncomment to see successful broadcasts
+                    # print(f"-> Broadcasted state to {relay}") 
+                    break 
+            except Exception as e:
+                print(f"-> Could not broadcast state to {relay}: {e}")
+    except Exception as e:
+        print(f"-> A critical error occurred in the broadcast function: {e}")
 
 # --- MAIN SIMULATION & WEB VISUALIZER LOOP ---
 def main_simulation_loop():
@@ -201,4 +212,4 @@ if __name__ == '__main__':
     socketio.start_background_task(target=main_simulation_loop)
     
     # Run the Flask-SocketIO server for the visualizer
-    socketio.run(app, host='0.0.0.0', port=5001)
+    socketio.run(app, host='0.0.0.0', port=5001, allow_unsafe_werkzeug=True)
