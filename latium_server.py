@@ -14,6 +14,8 @@ from flask_socketio import SocketIO
 
 # Import AetherOS and Nostr components
 sys.path.append(os.path.join(os.path.dirname(__file__), 'ferrocella/hyperboloid'))
+sys.path.append(os.path.join(os.path.dirname(__file__), 'aether'))
+
 from hyperboloid_aether_os import Contextus
 from pynostr.key import PrivateKey
 from pynostr.event import Event

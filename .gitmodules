@@ -1,3 +1,6 @@
 [submodule "ferrocella"]
 	path = ferrocella
 	url = https://github.com/IsidoreLands/ferrocella.git
+[submodule "aether"]
+	path = aether
+	url = https://github.com/IsidoreLands/aether.git
