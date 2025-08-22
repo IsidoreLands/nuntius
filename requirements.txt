@@ -4,6 +4,7 @@ flask-socketio
 numpy
 opencv-python
 jax[cpu]
+matplotlib
 
 # Aether & Animus Dependencies
 aiohttp
@@ -15,6 +16,7 @@ torchaudio
 pynostr
 python-dotenv
 websockets
+ecdsa
 
 # UI and Utility Dependencies
 rich
