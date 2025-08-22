@@ -1,174 +1,157 @@
+# Final version of nuntius_cli.py
 import os
 import asyncio
 import json
 import websockets
-import secrets
-import shlex
-from pynostr.event import Event
-from pynostr.key import PrivateKey
+from dotenv import load_dotenv
+from pynostr.key import PrivateKey, PublicKey
 from pynostr.encrypted_dm import EncryptedDirectMessage
-from bech32 import bech32_decode, convertbits
 from rich.console import Console
+from rich.panel import Panel
 
 console = Console()
+RELAYS = ['wss://relay.damus.io', 'wss://nostr.wine', 'wss://nos.lol']
 
-# --- Configuration ---
-RELAYS = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://nostr.wine']
-CHAT_KIND = 4  # Kind 4 for Encrypted DMs
-
-# --- State ---
-timeline = []
-
-# --- Key Loading and Validation ---
-def load_private_key():
-    """Loads and validates the nsec private key from environment variables."""
-    private_key_nsec = os.environ.get('NUNTIUS_NSEC', '').strip()
-    if not private_key_nsec:
-        console.print("[red]Error: NUNTIUS_NSEC not set in environment. Please set a valid 63-character nsec key.[/red]")
+async def find_server_on_nostr():
+    """Finds the server's public key by querying for its beacon event."""
+    console.print("[yellow]Searching for Latium server beacon on the Nostr network...[/yellow]")
+    # This filter looks for the unique beacon event
+    beacon_filter = {"kinds": [30078], "#d": ["latium_server_identity_v1"], "limit": 1}
+    subscription_id = os.urandom(8).hex()
+    
+    try:
+        async with websockets.connect(RELAYS[0], open_timeout=10) as ws:
+            await ws.send(json.dumps(['REQ', subscription_id, beacon_filter]))
+            # Wait up to 10 seconds for a response from the relay
+            response = await asyncio.wait_for(ws.recv(), timeout=10)
+            data = json.loads(response)
+            if data[0] == 'EVENT':
+                content = json.loads(data[2]['content'])
+                server_npub = content.get('npub')
+                if server_npub:
+                    console.print(f"[green]Server found! Address: {server_npub[:15]}...[/green]")
+                    # Save the found npub to the config file
+                    with open('config.json', 'w') as f:
+                        json.dump({"server_npub": server_npub}, f)
+                    return server_npub
+    except (asyncio.TimeoutError, websockets.exceptions.ConnectionClosed):
+        console.print(f"[red]Could not connect to relay or timed out waiting for beacon.[/red]")
         return None
-    try:
-        hrp, data = bech32_decode(private_key_nsec)
-        if not data or hrp != 'nsec':
-            raise ValueError("Invalid nsec prefix or data.")
-        privkey_bytes = bytes(convertbits(data, 5, 8, False))
-        return PrivateKey(privkey_bytes)
     except Exception as e:
-        console.print(f"[red]Error: Failed to decode NUNTIUS_NSEC: {e}. Ensure it is a valid 63-character Bech32 string.[/red]")
+        console.print(f"[red]Could not automatically find server: {e}[/red]")
         return None
+    return None
 
-# --- Nostr Communication ---
-async def nostr_listener(private_key):
-    """Listens for incoming and outgoing DMs and prints them."""
-    my_pubkey = private_key.public_key.hex()
-    subscription_id = secrets.token_hex(8)
-    filters = [
-        {'kinds': [CHAT_KIND], '#p': [my_pubkey], 'limit': 50},  # DMs sent TO me
-        {'kinds': [CHAT_KIND], 'authors': [my_pubkey], 'limit': 50} # DMs sent BY me
-    ]
+def setup_identity():
+    """Checks for a .env file and creates one with a new Nostr key if it doesn't exist."""
+    if os.path.exists('.env') and os.environ.get("NUNTIUS_NSEC"):
+        try:
+            # If the file exists and the key is valid, we're good.
+            return PrivateKey.from_nsec(os.environ.get("NUNTIUS_NSEC"))
+        except Exception as e:
+            console.print(f"[red]Error loading key from .env: {e}. A new key will be generated.[/red]")
 
-    while True: # Main reconnection loop
-        for relay in RELAYS:
-            try:
-                console.print(f"[dim]Connecting to {relay}...[/dim]")
-                async with websockets.connect(relay) as ws:
-                    console.print(f"[green]Connected to {relay}. Subscribing to DMs...[/green]")
-                    await ws.send(json.dumps(['REQ', subscription_id, *filters]))
-                    while True:
-                        response = await ws.recv()
-                        data = json.loads(response)
-                        if data[0] == 'EVENT':
-                            event = Event.from_json(data[2])
-                            try:
-                                decrypted = EncryptedDirectMessage.from_event(event, private_key)
-                                message_text = f"[cyan]{decrypted.sender_pubkey[:8]}...[/cyan]: {decrypted.cleartext_content}"
-                                timeline.append(message_text)
-                                console.print(message_text)
-                            except Exception as e:
-                                console.print(f"[red]Error decrypting event: {e}[/red]")
-            except (websockets.exceptions.ConnectionClosed, ConnectionRefusedError) as e:
-                console.print(f"[yellow]Connection to {relay} lost: {e}. Will retry...[/yellow]")
-            except Exception as e:
-                console.print(f"[red]An error occurred with {relay}: {e}[/red]")
-        
-        console.print(f"[yellow]Finished trying all relays. Waiting 10 seconds to reconnect...[/yellow]")
-        await asyncio.sleep(10)
+    console.print(Panel("[yellow]First-time setup:[/yellow] No personal Nostr key found.", subtitle="Generating a new identity..."))
+    
+    private_key = PrivateKey()
+    nsec = private_key.bech32()
+    npub = private_key.public_key.bech32()
 
-async def send_message(private_key, recipient_pubkey, message):
-    """Encrypts and sends a message to a recipient via all relays."""
-    try:
-        dm = EncryptedDirectMessage(
-            privkey=private_key,
-            recipient_pubkey=recipient_pubkey,
-            cleartext_content=message
-        )
-        event = dm.to_event()
-        event.sign(private_key.hex())
-        
-        message_json = json.dumps(['EVENT', event.to_json()])
-        
-        # Send to all relays in parallel
-        tasks = [asyncio.create_task(publish_to_relay(relay, message_json)) for relay in RELAYS]
-        results = await asyncio.gather(*tasks)
+    with open('.env', 'w') as f:
+        f.write(f"NUNTIUS_NSEC='{nsec}'\n")
+    
+    console.print(f"[green]New identity created and saved to `.env` file.[/green]")
+    console.print(f"Your new public key is: [bold cyan]{npub}[/bold cyan]")
+    
+    # Load the newly created variable into the environment for the current session
+    load_dotenv()
+    return private_key
 
-        if any(results):
-             console.print(f"[green]Message sent to {recipient_pubkey[:8]}...: '{message}'[/green]")
-        else:
-             console.print(f"[red]Failed to send message to any relay.[/red]")
-
-    except Exception as e:
-        console.print(f"[red]Error creating message: {e}[/red]")
-
-async def publish_to_relay(relay, message_json):
-    """Connects to a single relay and publishes a message."""
-    try:
-        async with websockets.connect(relay, open_timeout=5) as ws:
-            await ws.send(message_json)
-            return True
-    except Exception as e:
-        console.print(f"[dim]Failed to send to {relay}: {e}[/dim]")
-        return False
-
-# --- Main Application Logic ---
+# --- MAIN ENTRY POINT ---
 async def main():
-    """Initializes the application, starts the listener, and handles user input."""
-    private_key = load_private_key()
-    if not private_key:
-        return
+    """Initializes config and runs the main application loop."""
+    load_dotenv()
+    
+    # Automatically set up user's personal identity
+    global MY_PRIVATE_KEY
+    MY_PRIVATE_KEY = setup_identity()
 
-    console.print(f"[bold green]Welcome to Nuntius CLI![/bold green]")
-    console.print(f"Logged in with npub: [bold yellow]{private_key.public_key.bech32()}[/bold yellow]")
+    # Load server config from config.json or find it on the network
+    try:
+        with open('config.json', 'r') as f:
+            config = json.load(f)
+        SERVER_NPUB = config.get("server_npub")
+        if not SERVER_NPUB or "PASTE" in SERVER_NPUB:
+            raise FileNotFoundError # Trigger discovery
+    except FileNotFoundError:
+        SERVER_NPUB = await find_server_on_nostr()
+        if not SERVER_NPUB:
+            console.print("Error: Could not discover server. Please ensure the Latium server is running.")
+            return
 
-    # Start the listener as a background task
-    listener_task = asyncio.create_task(nostr_listener(private_key))
+    global SERVER_PUBKEY_HEX
+    SERVER_PUBKEY_HEX = PublicKey.from_npub(SERVER_NPUB).hex()
 
-    username = None
+    console.print(Panel("[bold green]Nuntius AetherOS Client[/bold green]\nEnter AetherOS commands to send to the Latium server.", border_style="green"))
+    listener_task = asyncio.create_task(state_listener())
+    
     while True:
         try:
-            # Run the blocking input in a separate thread to not freeze the event loop
-            raw_cmd = await asyncio.to_thread(console.input, "nuntius> ")
-            parts = shlex.split(raw_cmd)
-            if not parts:
-                continue
-            
-            command = parts[0].upper()
-
-            if command == 'VALE':
-                console.print("[bold yellow]Exiting...[/bold yellow]")
-                listener_task.cancel()
+            cmd = await asyncio.to_thread(input, "aetheros> ")
+            if cmd.lower() in ["exit", "quit", "vale"]:
                 break
+            if cmd.strip():
+                await send_command(cmd.strip())
+        except (KeyboardInterrupt, EOFError):
+            break
             
-            elif command == 'CREO':
-                if len(parts) == 2:
-                    username = parts[1]
-                    console.print(f"[yellow]Username set: {username}[/yellow]")
-                else:
-                    console.print("[red]Format: CREO 'your-username'[/red]")
+    listener_task.cancel()
+    console.print("[yellow]Disconnecting... Vale.[/yellow]")
 
-            elif command == 'MITTERE':
-                if len(parts) == 3:
-                    if not username:
-                        console.print("[red]Set a username first with: CREO 'your-username'[/red]")
-                        continue
-                    recipient_npub, message = parts[1], parts[2]
-                    full_message = f"{username}: {message}"
-                    await send_message(private_key, recipient_npub, full_message)
-                else:
-                    console.print("[red]Format: MITTERE 'recipient_npub' 'your message'[/red]")
-
-            elif command == 'LEGERE':
-                console.print("\n[bold blue]--- Timeline ---[/bold blue]")
-                for msg in timeline:
-                    console.print(msg)
-                console.print("[bold blue]----------------[/bold blue]\n")
-            
-            else:
-                console.print("[red]Invalid command. Use: CREO, MITTERE, LEGERE, VALE[/red]")
-
+# --- CORE FUNCTIONS ---
+async def state_listener():
+    """Listens for the server's public state broadcasts."""
+    state_filter = {"kinds": [1], "authors": [SERVER_PUBKEY_HEX], "#t": ["ferrocella-v1"]}
+    subscription_id = os.urandom(8).hex()
+    while True:
+        try:
+            async with websockets.connect(RELAYS[0]) as ws:
+                console.print(f"[dim]Subscribed to state updates from Latium server ({SERVER_NPUB[:10]}...) via {RELAYS[0]}...[/dim]")
+                await ws.send(json.dumps(['REQ', subscription_id, state_filter]))
+                while True:
+                    response = await ws.recv()
+                    data = json.loads(response)
+                    if data[0] == 'EVENT':
+                        content = json.loads(data[2]['content'])
+                        sextet = content.get('sextet', {})
+                        panel_content = ""
+                        for key, value in sextet.items():
+                            panel_content += f"[bold cyan]{key.capitalize()}:[/bold cyan] {value:e}\n"
+                        console.print(Panel(panel_content.strip(), title="[yellow]Latium State Update[/yellow]", border_style="dim blue"))
         except Exception as e:
-            console.print(f"[bold red]An error occurred in the main loop: {e}[/bold red]")
+            console.print(f"[red]State listener error: {e}. Reconnecting in 10s...[/red]")
+            await asyncio.sleep(10)
 
-if __name__ == '__main__':
+async def send_command(command_str: str):
+    """Formats and sends a command to the server as an encrypted DM."""
     try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        console.print("\n[bold yellow]Exiting Nuntius.[/bold yellow]")
+        command_json = json.dumps({"command": command_str})
+        dm = EncryptedDirectMessage()
+        dm.encrypt(MY_PRIVATE_KEY.hex(), recipient_pubkey=SERVER_PUBKEY_HEX, cleartext_content=command_json)
+        event = dm.to_event()
+        event.sign(MY_PRIVATE_KEY.hex())
+        message = json.dumps(['EVENT', event.to_dict()])
+        async with websockets.connect(RELAYS[1]) as ws:
+            await ws.send(message)
+            console.print(f"[green]>>> Command sent:[/green] {command_str}")
+            return True
+    except Exception as e:
+        console.print(f"[red]Error sending command: {e}[/red]")
+        return False
+
+if __name__ == "__main__":
+    if not os.path.exists('config.example.json'):
+        with open('config.example.json', 'w') as f:
+            json.dump({"server_npub": "CLIENT_WILL_FIND_THIS_AUTOMATICALLY"}, f)
+            
+    asyncio.run(main())

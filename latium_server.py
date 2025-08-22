@@ -111,10 +111,38 @@ async def broadcast_state_to_nostr(sextet_data):
         # This will now print the specific error if Event() fails
         print(f"-> Error creating/sending Nostr event: {e}")
 
+async def broadcast_identity_beacon():
+    try:
+        content = {
+            "name": "Latium AetherOS Server",
+            "about": "A server for the Ferrocella/Nuntius experiment.",
+            "npub": private_key.public_key.bech32()
+        }
+        # Kind 30078 is a replaceable event, good for profiles or statuses
+        event = Event(
+            kind=30078,
+            pubkey=private_key.public_key.hex(),
+            content=json.dumps(content),
+            tags=[["d", "latium_server_identity_v1"]] # This is the unique, findable ID
+        )
+        event.sign(private_key.hex())
+        message = json.dumps(['EVENT', event.to_dict()])
+        for relay in RELAYS:
+            try:
+                async with websockets.connect(relay, open_timeout=5) as ws:
+                    await ws.send(message)
+                    print(f"-> Identity beacon broadcasted to {relay}")
+                    break
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"-> Error broadcasting identity beacon: {e}")
+
 # --- MAIN SIMULATION LOOP ---
 def main_simulation_loop():
     print("-> Main simulation loop started.")
     last_broadcast_time = 0
+    last_beacon_time = 0
     while True:
         try:
             try:
