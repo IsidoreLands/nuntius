@@ -20,21 +20,28 @@ async def find_server_on_nostr():
     console.print("[yellow]Searching for Latium server beacon on the Nostr network...[/yellow]")
     beacon_filter = {"kinds": [30078], "#d": ["latium_server_identity_v1"], "limit": 1}
     subscription_id = os.urandom(8).hex()
-    try:
-        async with websockets.connect(RELAYS[0], open_timeout=10) as ws:
-            await ws.send(json.dumps(['REQ', subscription_id, beacon_filter]))
-            response = await asyncio.wait_for(ws.recv(), timeout=10)
-            data = json.loads(response)
-            if data[0] == 'EVENT':
-                content = json.loads(data[2]['content'])
-                server_npub = content.get('npub')
-                if server_npub:
-                    console.print(f"[green]Server found! Address: {server_npub[:15]}...[/green]")
-                    with open('config.json', 'w') as f:
-                        json.dump({"server_npub": server_npub}, f)
-                    return server_npub
-    except Exception as e:
-        console.print(f"[red]Could not automatically find server: {e}[/red]")
+    
+    # NEW: Try multiple relays to be more robust
+    for relay in RELAYS:
+        try:
+            console.print(f"[dim]Checking relay {relay}...[/dim]")
+            async with websockets.connect(relay, open_timeout=5) as ws:
+                await ws.send(json.dumps(['REQ', subscription_id, beacon_filter]))
+                response = await asyncio.wait_for(ws.recv(), timeout=5)
+                data = json.loads(response)
+                if data[0] == 'EVENT':
+                    content = json.loads(data[2]['content'])
+                    server_npub = content.get('npub')
+                    if server_npub:
+                        console.print(f"[green]Server found! Address: {server_npub[:15]}...[/green]")
+                        with open('config.json', 'w') as f:
+                            json.dump({"server_npub": server_npub}, f)
+                        return server_npub
+        except Exception:
+            # Try the next relay if one fails
+            continue
+            
+    console.print(f"[red]Could not automatically find server beacon on checked relays.[/red]")
     return None
 
 def setup_identity():
