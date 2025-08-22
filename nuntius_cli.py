@@ -10,7 +10,6 @@ from pynostr.key import PrivateKey, PublicKey
 from pynostr.encrypted_dm import EncryptedDirectMessage
 from rich.console import Console
 from rich.panel import Panel
-from rich.live import Live
 from rich.table import Table
 
 # --- GLOBAL SETUP ---
@@ -83,23 +82,24 @@ def load_configuration():
 MY_PRIVATE_KEY, SERVER_NPUB, SERVER_PUBKEY_HEX = load_configuration()
 
 # --- ASYNC LISTENERS ---
-async def command_log_listener(live_display):
-    """Listens for the shared command log and updates the live display."""
+async def command_log_listener():
+    """Listens for the shared command log and prints updates."""
     log_filter = {"kinds": [30078], "authors": [SERVER_PUBKEY_HEX], "#d": ["nuntius_command_log_v1"]}
     subscription_id = os.urandom(8).hex()
     while True:
         try:
             async with websockets.connect(RELAYS[0]) as ws:
                 await ws.send(json.dumps(['REQ', subscription_id, log_filter]))
-                console.print("[dim]Connected to command log stream...[/dim]")
                 while True:
                     response = await ws.recv()
                     data = json.loads(response)
                     if data[0] == 'EVENT':
                         new_log = json.loads(data[2]['content'])
-                        command_log.clear()
-                        command_log.extend(new_log)
-                        live_display.update(generate_log_table())
+                        if len(new_log) > len(command_log):
+                            command_log.clear()
+                            command_log.extend(new_log)
+                            console.print("\n[dim]-- Log updated --[/dim]")
+                            console.print(generate_log_table())
         except Exception as e:
             console.print(f"[red]Command log listener error: {e}. Reconnecting...[/red]")
             await asyncio.sleep(10)
@@ -161,7 +161,7 @@ async def main_loop():
     """The main user-facing application loop."""
     console.print(Panel("[bold green]Nuntius AetherOS Chat[/bold green]\nCommands you send will perturb the shared simulation.", border_style="green"))
 
-    # Fetch initial command log to populate the view
+    # Fetch and print the initial command log once
     log_filter = {"kinds": [30078], "authors": [SERVER_PUBKEY_HEX], "#d": ["nuntius_command_log_v1"], "limit": 1}
     subscription_id = f"initial-log-{os.urandom(4).hex()}"
     try:
@@ -172,34 +172,35 @@ async def main_loop():
             if data[0] == 'EVENT':
                 initial_log = json.loads(data[2]['content'])
                 command_log.extend(initial_log)
+                console.print(generate_log_table())
     except Exception as e:
         console.print(f"[yellow]Could not fetch initial command log: {e}[/yellow]")
 
-    with Live(generate_log_table(), screen=True, redirect_stderr=False, refresh_per_second=4) as live:
-        log_listener_task = asyncio.create_task(command_log_listener(live))
-        sextet_listener_task = asyncio.create_task(sextet_listener())
+    # Start background listeners
+    log_listener_task = asyncio.create_task(command_log_listener())
+    sextet_listener_task = asyncio.create_task(sextet_listener())
 
-        while True:
-            try:
-                cmd = await asyncio.to_thread(input, f"aetheros ({MY_PRIVATE_KEY.public_key.bech32()[:10]}...)> ")
-                
-                global display_sextet
-                if cmd.upper() == 'LEGERE':
-                    display_sextet = not display_sextet
-                    status = "ON" if display_sextet else "OFF"
-                    console.print(f"[bold yellow]Live sextet display is now {status}[/bold yellow]")
-                    continue
+    while True:
+        try:
+            cmd = await asyncio.to_thread(input, f"aetheros ({MY_PRIVATE_KEY.public_key.bech32()[:10]}...)> ")
+            
+            global display_sextet
+            if cmd.upper() == 'LEGERE':
+                display_sextet = not display_sextet
+                status = "ON" if display_sextet else "OFF"
+                console.print(f"[bold yellow]Live sextet display is now {status}[/bold yellow]")
+                continue
 
-                if cmd.lower() in ["exit", "quit", "vale"]:
-                    break
-                if cmd.strip():
-                    await send_command(cmd.strip())
-            except (KeyboardInterrupt, EOFError):
+            if cmd.lower() in ["exit", "quit", "vale"]:
                 break
-        
-        log_listener_task.cancel()
-        sextet_listener_task.cancel()
-        console.print("[yellow]Disconnecting... Vale.[/yellow]")
+            if cmd.strip():
+                await send_command(cmd.strip())
+        except (KeyboardInterrupt, EOFError):
+            break
+    
+    log_listener_task.cancel()
+    sextet_listener_task.cancel()
+    console.print("[yellow]Disconnecting... Vale.[/yellow]")
 
 if __name__ == "__main__":
     if not os.path.exists('config.example.json'):
