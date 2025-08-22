@@ -1,17 +1,16 @@
-from ecdsa import SigningKey, SECP256k1
-import bech32
-import secrets
+# A clean version of generate_keys.py
+from pynostr.key import PrivateKey
 
-# Generate private key
-privkey = secrets.token_bytes(32)
-sk = SigningKey.from_string(privkey, curve=SECP256k1)
-pubkey = sk.verifying_key.to_string("compressed").hex()
+# 1. Generate ONE key pair and store it
+private_key = PrivateKey()
+public_key = private_key.public_key
 
-# Encode to npub and nsec
-pubkey_data = bech32.convertbits(bytes.fromhex(pubkey), 8, 5)
-npub = bech32.bech32_encode('npub', pubkey_data)
-privkey_data = bech32.convertbits(privkey, 8, 5)
-nsec = bech32.bech32_encode('nsec', privkey_data)
+# 2. Print it to the screen
+print(f"Nostr public key: {public_key.bech32()}")
+print(f"Nostr private key (KEEP SECRET): {private_key.bech32()}")
 
-print(f"Nostr public key: {npub}")
-print(f"Nostr private key (KEEP SECRET): {nsec}")
+# 3. Save that SAME key pair to a file
+with open("nostr_keys.txt", "w") as f:
+    f.write(f"Public key: {public_key.bech32()}\n")
+    f.write(f"Private key: {private_key.bech32()}\n")
+print("\nKeys also saved to nostr_keys.txt")
