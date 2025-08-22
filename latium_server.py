@@ -8,7 +8,6 @@ import queue
 import json
 import threading
 import asyncio
-import websockets
 import base64
 import numpy as np
 from flask import Flask, render_template
@@ -33,8 +32,7 @@ print("-> AetherOS Initialized.")
 # Nostr Configuration
 RELAYS = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://nostr.wine']
 private_key_nsec = os.environ.get('NUNTIUS_NSEC', '').strip()
-if not private_key_nsec:
-    raise ValueError("FATAL: NUNTIUS_NSEC not set in environment.")
+if not private_key_nsec: raise ValueError("FATAL: NUNTIUS_NSEC not set in environment.")
 try:
     private_key = PrivateKey.from_nsec(private_key_nsec)
     print(f"-> Server running with Nostr pubkey: {private_key.public_key.bech32()}")
@@ -43,6 +41,7 @@ except Exception as e:
 
 command_queue = queue.Queue()
 command_log = deque(maxlen=50)
+nostr_event_loop = None # Global variable for the asyncio loop
 
 # --- FLASK & SOCKETIO SETUP ---
 app = Flask(__name__, template_folder='web/templates', static_folder='web/static')
@@ -55,6 +54,7 @@ async def nostr_listener():
     subscription_id = os.urandom(8).hex()
     while True:
         try:
+            import websockets
             async with websockets.connect(RELAYS[0]) as ws:
                 print(f"-> Nostr listener connected to {RELAYS[0]}")
                 await ws.send(json.dumps(['REQ', subscription_id, dm_filter]))
@@ -70,11 +70,7 @@ async def nostr_listener():
                             dm.decrypt(private_key_bech32=private_key_nsec, encrypted_message=event_data['content'], public_key_hex=sender_pubkey)
                             command_data = json.loads(dm.cleartext_content)
                             if 'command' in command_data:
-                                command_entry = {
-                                    "sender": sender_pubkey[:8],
-                                    "command": command_data['command'],
-                                    "timestamp": int(time.time())
-                                }
+                                command_entry = {"sender": sender_pubkey[:8], "command": command_data['command'], "timestamp": int(time.time())}
                                 print(f"-> Received command from {sender_pubkey[:8]}: {command_data['command']}")
                                 command_queue.put(command_entry)
                         except Exception as e:
@@ -84,24 +80,31 @@ async def nostr_listener():
             await asyncio.sleep(10)
 
 def run_nostr_listener_in_thread():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(nostr_listener())
-    loop.close()
+    global nostr_event_loop
+    nostr_event_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(nostr_event_loop)
+    nostr_event_loop.run_until_complete(nostr_listener())
+    nostr_event_loop.close()
 
-async def broadcast_event(event):
-    """Helper function to broadcast any signed event."""
+async def broadcast_event_async(event):
+    import websockets
     message = json.dumps(['EVENT', event.to_dict()])
     for relay in RELAYS:
         try:
             async with websockets.connect(relay, open_timeout=5) as ws:
                 await ws.send(message)
-                break
+                return
         except Exception:
             pass
 
-async def broadcast_identity_beacon():
-    """Broadcasts a discoverable identity event for new clients."""
+def broadcast_event_sync(event):
+    """Thread-safe function to call the async broadcaster from a sync thread."""
+    if nostr_event_loop and nostr_event_loop.is_running():
+        future = asyncio.run_coroutine_threadsafe(broadcast_event_async(event), nostr_event_loop)
+        future.result(timeout=10) # Wait for the broadcast to complete
+
+async def broadcast_identity_beacon_async():
+    """Asynchronously broadcasts a discoverable identity event for new clients."""
     try:
         content = {
             "name": "Latium AetherOS Server",
@@ -110,7 +113,7 @@ async def broadcast_identity_beacon():
         }
         event = Event(kind=30078, pubkey=private_key.public_key.hex(), content=json.dumps(content), tags=[["d", "latium_server_identity_v1"]])
         event.sign(private_key.hex())
-        await broadcast_event(event)
+        await broadcast_event_async(event)
         print("-> Identity beacon broadcasted.")
     except Exception as e:
         print(f"-> Error broadcasting identity beacon: {e}")
@@ -118,41 +121,44 @@ async def broadcast_identity_beacon():
 # --- MAIN SIMULATION LOOP ---
 def main_simulation_loop():
     print("-> Main simulation loop started.")
-    last_sextet_broadcast_time = 0
-    last_beacon_time = 0
+    last_sextet_broadcast_time = time.time()
+    last_beacon_time = time.time()
     
     while True:
         try:
             try:
                 command_entry = command_queue.get_nowait()
-                asyncio.run(context.execute_command(command_entry['command']))
-                command_log.append(command_entry)
-                log_event_content = json.dumps(list(command_log))
-                log_event = Event(kind=30078, pubkey=private_key.public_key.hex(), content=log_event_content, tags=[["d", "nuntius_command_log_v1"]])
-                log_event.sign(private_key.hex())
-                asyncio.run(broadcast_event(log_event))
+                
+                def command_runner(entry):
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    loop.run_until_complete(context.execute_command(entry['command']))
+                    loop.close()
+                    
+                    command_log.append(entry)
+                    log_event = Event(kind=30078, pubkey=private_key.public_key.hex(), content=json.dumps(list(command_log)), tags=[["d", "nuntius_command_log_v1"]])
+                    log_event.sign(private_key.hex())
+                    broadcast_event_sync(log_event)
+
+                threading.Thread(target=command_runner, args=(command_entry,)).start()
             except queue.Empty:
                 pass
             
             if time.time() - last_sextet_broadcast_time > 1.0:
                 focused_materia = context.get_focused_materia()
-                sextet_data = {k: float(v) for k, v in {
-                    'resistance': focused_materia.resistance, 'capacitance': focused_materia.capacitance, 'permeability': focused_materia.permeability,
-                    'magnetism': focused_materia.magnetism, 'permittivity': focused_materia.permittivity, 'dielectricity': focused_materia.dielectricity
-                }.items()}
-                state_event_content = json.dumps({"sextet": sextet_data})
-                state_event = Event(kind=30078, pubkey=private_key.public_key.hex(), content=state_event_content, tags=[["d", "nuntius_sextet_state_v1"]])
+                sextet_data = {k: float(v) for k, v in {'resistance': focused_materia.resistance, 'capacitance': focused_materia.capacitance, 'permeability': focused_materia.permeability, 'magnetism': focused_materia.magnetism, 'permittivity': focused_materia.permittivity, 'dielectricity': focused_materia.dielectricity}.items()}
+                state_event = Event(kind=30078, pubkey=private_key.public_key.hex(), content=json.dumps({"sextet": sextet_data}), tags=[["d", "nuntius_sextet_state_v1"]])
                 state_event.sign(private_key.hex())
-                asyncio.run(broadcast_event(state_event))
+                broadcast_event_sync(state_event)
                 last_sextet_broadcast_time = time.time()
 
-            if time.time() - last_beacon_time > 3600:
-                asyncio.run(broadcast_identity_beacon())
+            if time.time() - last_beacon_time > 3600: # Re-broadcast beacon every hour
+                if nostr_event_loop and nostr_event_loop.is_running():
+                    asyncio.run_coroutine_threadsafe(broadcast_identity_beacon_async(), nostr_event_loop)
                 last_beacon_time = time.time()
-                
+
         except Exception as e:
             print(f"-> Error in main loop: {e}")
-        
         socketio.sleep(0.1)
 
 @app.route('/')
@@ -165,9 +171,15 @@ def h_connect():
 
 if __name__ == '__main__':
     print("-> Starting Ferrocella Central Server ('Latium')...")
-    asyncio.run(broadcast_identity_beacon())
     
     nostr_thread = threading.Thread(target=run_nostr_listener_in_thread, daemon=True)
     nostr_thread.start()
+    
+    time.sleep(2) # Give the nostr_event_loop a moment to initialize before using it
+    
+    # Broadcast the beacon once on startup using the thread-safe method
+    if nostr_event_loop:
+        asyncio.run_coroutine_threadsafe(broadcast_identity_beacon_async(), nostr_event_loop)
+
     socketio.start_background_task(target=main_simulation_loop)
     socketio.run(app, host='0.0.0.0', port=5001, allow_unsafe_werkzeug=True)

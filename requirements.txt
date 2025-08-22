@@ -17,6 +17,7 @@ sentence-transformers
 pynostr
 python-dotenv
 websockets
+websocket-client
 ecdsa
 
 # UI and Utility Dependencies

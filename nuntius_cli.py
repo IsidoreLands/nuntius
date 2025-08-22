@@ -83,7 +83,6 @@ MY_PRIVATE_KEY, SERVER_NPUB, SERVER_PUBKEY_HEX = load_configuration()
 
 # --- ASYNC LISTENERS ---
 async def command_log_listener():
-    """Listens for the shared command log and prints updates."""
     log_filter = {"kinds": [30078], "authors": [SERVER_PUBKEY_HEX], "#d": ["nuntius_command_log_v1"]}
     subscription_id = os.urandom(8).hex()
     while True:
@@ -95,13 +94,14 @@ async def command_log_listener():
                     data = json.loads(response)
                     if data[0] == 'EVENT':
                         new_log = json.loads(data[2]['content'])
-                        if len(new_log) > len(command_log):
+                        if len(new_log) > 0 and (len(command_log) == 0 or new_log[-1]['timestamp'] > command_log[-1]['timestamp']):
                             command_log.clear()
                             command_log.extend(new_log)
-                            console.print("\n[dim]-- Log updated --[/dim]")
-                            console.print(generate_log_table())
-        except Exception as e:
-            console.print(f"[red]Command log listener error: {e}. Reconnecting...[/red]")
+                            latest_entry = command_log[-1]
+                            dt_object = datetime.fromtimestamp(latest_entry['timestamp'])
+                            time_str = dt_object.strftime('%H:%M:%S')
+                            console.print(f"\n[dim]{time_str}[/dim] [cyan]{latest_entry['sender']}[/cyan]: {latest_entry['command']}")
+        except Exception:
             await asyncio.sleep(10)
 
 async def sextet_listener():
@@ -159,9 +159,8 @@ async def send_command(command_str: str):
 # --- MAIN APPLICATION LOOP ---
 async def main_loop():
     """The main user-facing application loop."""
-    console.print(Panel("[bold green]Nuntius AetherOS Chat[/bold green]\nCommands you send will perturb the shared simulation.", border_style="green"))
+    console.print(Panel("[bold green]Nuntius AetherOS Chat[/bold green]\nCommands you send will perturb the shared simulation. See https://ooda.wiki/wiki/Nuntius_(AetherOS) for list of commands.", border_style="green"))
 
-    # Fetch and print the initial command log once
     log_filter = {"kinds": [30078], "authors": [SERVER_PUBKEY_HEX], "#d": ["nuntius_command_log_v1"], "limit": 1}
     subscription_id = f"initial-log-{os.urandom(4).hex()}"
     try:
@@ -176,13 +175,15 @@ async def main_loop():
     except Exception as e:
         console.print(f"[yellow]Could not fetch initial command log: {e}[/yellow]")
 
-    # Start background listeners
     log_listener_task = asyncio.create_task(command_log_listener())
     sextet_listener_task = asyncio.create_task(sextet_listener())
 
     while True:
         try:
             cmd = await asyncio.to_thread(input, f"aetheros ({MY_PRIVATE_KEY.public_key.bech32()[:10]}...)> ")
+            if cmd.upper() == 'OSTENDO':
+                console.print(generate_log_table())
+                continue
             
             global display_sextet
             if cmd.upper() == 'LEGERE':
@@ -206,5 +207,4 @@ if __name__ == "__main__":
     if not os.path.exists('config.example.json'):
         with open('config.example.json', 'w') as f:
             json.dump({"server_npub": "CLIENT_WILL_FIND_THIS_AUTOMATICALLY"}, f)
-            
     asyncio.run(main_loop())
