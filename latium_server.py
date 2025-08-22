@@ -2,6 +2,8 @@
 import sys
 import os
 import time
+from dotenv import load_dotenv
+load_dotenv()
 import queue
 import json
 import threading
@@ -135,34 +137,21 @@ def main_simulation_loop():
     last_broadcast_time = 0
     
     while True:
-        # 1. Check for and execute commands from the Nostr queue
         try:
-            command = command_queue.get_nowait()
-            # AetherOS command execution is async, so we need to run it in a loop
-            asyncio.run(context.execute_command(command))
-        except queue.Empty:
-            pass # No command, just continue the loop
-        except Exception as e:
-            print(f"-> Error executing command '{command}': {e}")
+            # 1. Check for and execute commands from the Nostr queue
+            try:
+                command = command_queue.get_nowait()
+                asyncio.run(context.execute_command(command))
+            except queue.Empty:
+                pass
+            except Exception as e:
+                print(f"-> Error executing command '{command}': {e}")
             
-        # 2. Get the current state from the focused Materia in AetherOS
-        # MODIFIED: We get the state from AetherOS, not a separate sim_engine
-        try:
+            # 2. Get the current state from the focused Materia in AetherOS
             focused_materia = context.get_focused_materia()
             
-            # This part is for the WEB VISUALIZER
-            # We will use the materia's grid for visualization
-            image_grid = focused_materia.grid
-            min_val, max_val = np.min(image_grid), np.max(image_grid)
-            if max_val > min_val:
-                image_grid = (image_grid - min_val) / (max_val - min_val)
-            pixels = (np.array(image_grid) * 255).astype(np.uint8)
-            # Create a simple grayscale image for the visualizer
-            rgba_image = np.stack([pixels, pixels, pixels, np.full_like(pixels, 255)], axis=-1)
-            grid_b64 = base64.b64encode(rgba_image.tobytes()).decode('utf-8')
-            
             # This part gets the SEXTET data
-            sextet_data = {
+            sextet_data_raw = {
                 'resistance': focused_materia.resistance,
                 'capacitance': focused_materia.capacitance,
                 'permeability': focused_materia.permeability,
@@ -174,21 +163,28 @@ def main_simulation_loop():
             sextet_data = {k: float(v) for k, v in sextet_data_raw.items()}
 
             # 3. Emit state to the web visualizer via WebSocket
+            image_grid = focused_materia.grid
+            min_val, max_val = np.min(image_grid), np.max(image_grid)
+            if max_val > min_val:
+                image_grid = (image_grid - min_val) / (max_val - min_val)
+            pixels = (np.array(image_grid) * 255).astype(np.uint8)
+            rgba_image = np.stack([pixels, pixels, pixels, np.full_like(pixels, 255)], axis=-1)
+            grid_b64 = base64.b64encode(rgba_image.tobytes()).decode('utf-8')
+            
             socketio.emit('simulation_update', {
                 'grid': grid_b64, 'width': focused_materia.size, 'height': focused_materia.size,
                 'readings': sextet_data,
                 'focus': context.focus
             })
 
-            # 4. Broadcast state to Nostr clients (rate-limited to once per second)
+            # 4. Broadcast state to Nostr clients (rate-limited)
             current_time = time.time()
             if current_time - last_broadcast_time > 1.0:
                 asyncio.run(broadcast_state_to_nostr(sextet_data))
                 last_broadcast_time = current_time
 
-        except ValueError as e: # Handles case where no materia exists
-             # print(e) # Can be noisy
-             pass
+        except ValueError: # Handles case where no materia exists yet
+            pass
         except Exception as e:
             print(f"-> Error in main loop: {e}")
 
