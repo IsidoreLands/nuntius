@@ -1,28 +1,27 @@
-# Final version of latium_server.py
+# latium_server.py
 import sys
 import os
 import time
-from dotenv import load_dotenv
-load_dotenv()
-import queue
+import ssl
 import json
 import threading
 import asyncio
-import base64
+import queue
 import numpy as np
+from dotenv import load_dotenv
 from flask import Flask, render_template
 from flask_socketio import SocketIO
 from collections import deque
+from pynostr.key import PrivateKey, PublicKey
+from pynostr.event import Event
+from pynostr.encrypted_dm import EncryptedDirectMessage
+
+load_dotenv()
 
 # Add submodules to the Python path
 sys.path.append(os.path.join(os.path.dirname(__file__), 'ferrocella/hyperboloid'))
 sys.path.append(os.path.join(os.path.dirname(__file__), 'aether'))
-
-# Import AetherOS and Nostr components
 from hyperboloid_aether_os import Contextus
-from pynostr.key import PrivateKey, PublicKey
-from pynostr.event import Event
-from pynostr.encrypted_dm import EncryptedDirectMessage
 
 # --- CONFIGURATION ---
 print("-> Initializing AetherOS Contextus...")
@@ -32,7 +31,8 @@ print("-> AetherOS Initialized.")
 # Nostr Configuration
 RELAYS = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://nostr.wine']
 private_key_nsec = os.environ.get('NUNTIUS_NSEC', '').strip()
-if not private_key_nsec: raise ValueError("FATAL: NUNTIUS_NSEC not set in environment.")
+if not private_key_nsec:
+    raise ValueError("FATAL: NUNTIUS_NSEC not set in environment.")
 try:
     private_key = PrivateKey.from_nsec(private_key_nsec)
     print(f"-> Server running with Nostr pubkey: {private_key.public_key.bech32()}")
@@ -42,6 +42,11 @@ except Exception as e:
 command_queue = queue.Queue()
 command_log = deque(maxlen=50)
 nostr_event_loop = None
+
+# SSL Context for WebSocket connections
+ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+ssl_context.check_hostname = False
+ssl_context.verify_mode = ssl.CERT_NONE
 
 # --- FLASK & SOCKETIO SETUP ---
 app = Flask(__name__, template_folder='web/templates', static_folder='web/static')
@@ -56,13 +61,14 @@ async def nostr_listener():
     while True:
         for relay in RELAYS:
             try:
-                async with websockets.connect(relay, open_timeout=5, ping_interval=20, ping_timeout=10) as ws:
+                async with websockets.connect(relay, ssl=ssl_context, open_timeout=5, ping_interval=20, ping_timeout=10) as ws:
                     print(f"-> Nostr listener connected to {relay}")
                     await ws.send(json.dumps(['REQ', subscription_id, dm_filter]))
                     while True:
                         try:
                             response = await asyncio.wait_for(ws.recv(), timeout=30)
                             data = json.loads(response)
+                            print(f"-> Received data from {relay}: {data}")
                             if data[0] == 'EVENT':
                                 event_data = data[2]
                                 try:
@@ -71,7 +77,11 @@ async def nostr_listener():
                                     dm.decrypt(private_key_bech32=private_key_nsec, encrypted_message=event_data['content'], public_key_hex=sender_pubkey)
                                     command_data = json.loads(dm.cleartext_content)
                                     if 'command' in command_data:
-                                        command_entry = {"sender": sender_pubkey[:8], "command": command_data['command'], "timestamp": int(time.time())}
+                                        command_entry = {
+                                            "sender": sender_pubkey[:8],
+                                            "command": command_data['command'],
+                                            "timestamp": int(time.time())
+                                        }
                                         print(f"-> Received command from {sender_pubkey[:8]}: {command_data['command']}")
                                         command_queue.put(command_entry)
                                 except Exception as e:
@@ -99,10 +109,12 @@ def run_nostr_listener_in_thread():
 async def broadcast_event_async(event):
     import websockets
     message = json.dumps(['EVENT', event.to_dict()])
+    print(f"-> Broadcasting event: {event.to_dict()}")
     for relay in RELAYS:
         try:
-            async with websockets.connect(relay, open_timeout=5, ping_interval=20, ping_timeout=10) as ws:
+            async with websockets.connect(relay, ssl=ssl_context, open_timeout=5, ping_interval=20, ping_timeout=10) as ws:
                 await ws.send(message)
+                print(f"-> Successfully broadcasted to {relay}")
                 return
         except Exception as e:
             print(f"-> Failed to broadcast to {relay}: {e}")
@@ -118,19 +130,24 @@ def broadcast_event_sync(event):
 
 async def broadcast_identity_beacon_async():
     try:
-        content = {"name": "Latium AetherOS Server", "about": "A server for the Ferrocella/Nuntius experiment.", "npub": private_key.public_key.bech32()}
+        content = {
+            "name": "Latium AetherOS Server",
+            "about": "A server for the Ferrocella/Nuntius experiment.",
+            "npub": private_key.public_key.bech32()
+        }
         event = Event(kind=30078, pubkey=private_key.public_key.hex(), content=json.dumps(content), tags=[["d", "latium_server_identity_v1"]])
         event.sign(private_key.hex())
         await broadcast_event_async(event)
+        print("-> Identity beacon broadcasted.")
     except Exception as e:
         print(f"-> Error broadcasting identity beacon: {e}")
 
+# --- MAIN SIMULATION LOOP ---
 def main_simulation_loop():
     print("-> Main simulation loop started.")
     last_sextet_broadcast_time = time.time()
     last_log_broadcast_time = time.time()
     last_beacon_time = time.time()
-
     while True:
         try:
             try:
@@ -144,26 +161,32 @@ def main_simulation_loop():
                         log_event = Event(kind=30078, pubkey=private_key.public_key.hex(), content=json.dumps(list(command_log)), tags=[["d", "nuntius_command_log_v1"]])
                         log_event.sign(private_key.hex())
                         broadcast_event_sync(log_event)
+                        print(f"-> Broadcasted command log: {entry['command']}")
                     finally:
                         loop.close()
                 threading.Thread(target=command_runner, args=(command_entry,), daemon=True).start()
             except queue.Empty:
                 pass
-
             if time.time() - last_sextet_broadcast_time > 1.0:
                 focused_materia = context.get_focused_materia()
-                sextet_data = {k: float(v) for k, v in {'resistance': focused_materia.resistance, 'capacitance': focused_materia.capacitance, 'permeability': focused_materia.permeability, 'magnetism': focused_materia.magnetism, 'permittivity': focused_materia.permittivity, 'dielectricity': focused_materia.dielectricity}.items()}
+                sextet_data = {k: float(v) for k, v in {
+                    'resistance': focused_materia.resistance,
+                    'capacitance': focused_materia.capacitance,
+                    'permeability': focused_materia.permeability,
+                    'magnetism': focused_materia.magnetism,
+                    'permittivity': focused_materia.permittivity,
+                    'dielectricity': focused_materia.dielectricity
+                }.items()}
                 state_event = Event(kind=30078, pubkey=private_key.public_key.hex(), content=json.dumps({"sextet": sextet_data}), tags=[["d", "nuntius_sextet_state_v1"]])
                 state_event.sign(private_key.hex())
                 broadcast_event_sync(state_event)
                 last_sextet_broadcast_time = time.time()
-            
             if time.time() - last_log_broadcast_time > 30:
                 log_event = Event(kind=30078, pubkey=private_key.public_key.hex(), content=json.dumps(list(command_log)), tags=[["d", "nuntius_command_log_v1"]])
                 log_event.sign(private_key.hex())
                 broadcast_event_sync(log_event)
                 last_log_broadcast_time = time.time()
-
+                print("-> Periodic command log broadcast")
             if time.time() - last_beacon_time > 3600:
                 if nostr_event_loop and not nostr_event_loop.is_closed():
                     asyncio.run_coroutine_threadsafe(broadcast_identity_beacon_async(), nostr_event_loop)

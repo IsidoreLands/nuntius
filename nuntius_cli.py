@@ -1,9 +1,9 @@
-# Final version of nuntius_cli.py
+# nuntius_cli.py
 import os
 import asyncio
 import json
-import websockets
 import time
+import ssl
 from datetime import datetime
 from dotenv import load_dotenv
 from pynostr.key import PrivateKey, PublicKey
@@ -12,12 +12,18 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.live import Live
+import websockets
 
+load_dotenv()
 console = Console()
 RELAYS = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://nostr.wine']
-load_dotenv()
 display_sextet = False
 command_log = []
+
+# SSL Context for WebSocket connections
+ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+ssl_context.check_hostname = False
+ssl_context.verify_mode = ssl.CERT_NONE
 
 async def find_server_on_nostr():
     console.print("[yellow]Searching for Latium server beacon on the Nostr network...[/yellow]")
@@ -26,10 +32,11 @@ async def find_server_on_nostr():
     for relay in RELAYS:
         try:
             console.print(f"[dim]Checking relay {relay}...[/dim]")
-            async with websockets.connect(relay, open_timeout=5, ping_interval=20, ping_timeout=10) as ws:
+            async with websockets.connect(relay, ssl=ssl_context, open_timeout=5, ping_interval=20, ping_timeout=10) as ws:
                 await ws.send(json.dumps(['REQ', subscription_id, beacon_filter]))
                 response = await asyncio.wait_for(ws.recv(), timeout=5)
                 data = json.loads(response)
+                console.print(f"[dim]Received from {relay}: {data}[/dim]")
                 if data[0] == 'EVENT':
                     content = json.loads(data[2]['content'])
                     server_npub = content.get('npub')
@@ -82,24 +89,27 @@ async def command_log_listener(live_display):
     while True:
         for relay in RELAYS:
             try:
-                async with websockets.connect(relay, open_timeout=5, ping_interval=20, ping_timeout=10) as ws:
+                async with websockets.connect(relay, ssl=ssl_context, open_timeout=5, ping_interval=20, ping_timeout=10) as ws:
+                    console.print(f"[dim]Connected to {relay} for command log...[/dim]")
                     await ws.send(json.dumps(['REQ', subscription_id, log_filter]))
                     while True:
                         try:
                             response = await asyncio.wait_for(ws.recv(), timeout=30)
                             data = json.loads(response)
+                            console.print(f"[dim]Received from {relay}: {data}[/dim]")
                             if data[0] == 'EVENT':
                                 new_log = json.loads(data[2]['content'])
                                 command_log.clear()
                                 command_log.extend(new_log)
                                 live_display.update(generate_log_table())
                         except asyncio.TimeoutError:
+                            console.print(f"[yellow]Timeout on {relay}, retrying...[/yellow]")
                             break
                         except Exception as e:
-                            print(f"[red]Error in command log listener on {relay}: {e}")
+                            console.print(f"[red]Error in command log listener on {relay}: {e}[/red]")
                             break
             except Exception as e:
-                print(f"[red]Failed to connect to {relay} for command log: {e}")
+                console.print(f"[red]Failed to connect to {relay} for command log: {e}[/red]")
             await asyncio.sleep(5)
         await asyncio.sleep(10)
 
@@ -110,12 +120,14 @@ async def sextet_listener():
         if display_sextet:
             for relay in RELAYS:
                 try:
-                    async with websockets.connect(relay, open_timeout=5, ping_interval=20, ping_timeout=10) as ws:
+                    async with websockets.connect(relay, ssl=ssl_context, open_timeout=5, ping_interval=20, ping_timeout=10) as ws:
+                        console.print(f"[dim]Connected to {relay} for sextet data...[/dim]")
                         await ws.send(json.dumps(['REQ', subscription_id, state_filter]))
                         while display_sextet:
                             try:
                                 response = await asyncio.wait_for(ws.recv(), timeout=30)
                                 data = json.loads(response)
+                                console.print(f"[dim]Received from {relay}: {data}[/dim]")
                                 if data[0] == 'EVENT':
                                     content = json.loads(data[2]['content'])
                                     sextet = content.get('sextet', {})
@@ -124,12 +136,13 @@ async def sextet_listener():
                                         panel_content += f"[bold cyan]{key.capitalize()}:[/bold cyan] {value:e}\n"
                                     console.print(Panel(panel_content.strip(), title="[yellow]Live Sextet Data[/yellow]", border_style="dim yellow"))
                             except asyncio.TimeoutError:
+                                console.print(f"[yellow]Timeout on {relay}, retrying...[/yellow]")
                                 break
                             except Exception as e:
-                                print(f"[red]Sextet listener error on {relay}: {e}")
+                                console.print(f"[red]Sextet listener error on {relay}: {e}[/red]")
                                 break
                 except Exception as e:
-                    print(f"[red]Failed to connect to {relay} for sextet data: {e}")
+                    console.print(f"[red]Failed to connect to {relay} for sextet data: {e}[/red]")
                 await asyncio.sleep(5)
         await asyncio.sleep(1)
 
@@ -147,22 +160,25 @@ def generate_log_table() -> Table:
 async def send_command(command_str: str):
     try:
         command_json = json.dumps({"command": command_str})
+        console.print(f"[dim]Preparing to send command: {command_str}[/dim]")
         dm = EncryptedDirectMessage()
         dm.encrypt(MY_PRIVATE_KEY.hex(), recipient_pubkey=SERVER_PUBKEY_HEX, cleartext_content=command_json)
         event = dm.to_event()
         event.sign(MY_PRIVATE_KEY.hex())
         message = json.dumps(['EVENT', event.to_dict()])
+        console.print(f"[dim]Event to send: {event.to_dict()}[/dim]")
         for relay in RELAYS:
             try:
-                async with websockets.connect(relay, open_timeout=5, ping_interval=20, ping_timeout=10) as ws:
+                async with websockets.connect(relay, ssl=ssl_context, open_timeout=5, ping_interval=20, ping_timeout=10) as ws:
                     await ws.send(message)
+                    console.print(f"[green]Command sent to {relay}: {command_str}[/green]")
                     return True
             except Exception as e:
-                print(f"[red]Failed to send command to {relay}: {e}")
-        print("[red]Failed to send command to any relay[/red]")
+                console.print(f"[red]Failed to send command to {relay}: {e}[/red]")
+        console.print("[red]Failed to send command to any relay[/red]")
         return False
     except Exception as e:
-        print(f"[red]Error sending command: {e}")
+        console.print(f"[red]Error sending command: {e}[/red]")
         return False
 
 async def main_loop():
@@ -171,17 +187,18 @@ async def main_loop():
     subscription_id = f"initial-log-{os.urandom(4).hex()}"
     for relay in RELAYS:
         try:
-            async with websockets.connect(relay, open_timeout=5, ping_interval=20, ping_timeout=10) as ws:
+            async with websockets.connect(relay, ssl=ssl_context, open_timeout=5, ping_interval=20, ping_timeout=10) as ws:
+                console.print(f"[dim]Fetching initial log from {relay}...[/dim]")
                 await ws.send(json.dumps(['REQ', subscription_id, log_filter]))
                 response = await asyncio.wait_for(ws.recv(), timeout=5)
                 data = json.loads(response)
+                console.print(f"[dim]Initial log response from {relay}: {data}[/dim]")
                 if data[0] == 'EVENT':
                     command_log.extend(json.loads(data[2]['content']))
                     break
         except Exception as e:
-            print(f"[yellow]Could not fetch initial command log from {relay}: {e}[/yellow]")
-    
-    with Live(generate_log_table(), auto_refresh=False, screen=False) as live:
+            console.print(f"[yellow]Could not fetch initial command log from {relay}: {e}[/yellow]")
+    with Live(generate_log_table(), auto_refresh=False, screen=False, console=console, refresh_per_second=4) as live:
         log_listener_task = asyncio.create_task(command_log_listener(live))
         sextet_listener_task = asyncio.create_task(sextet_listener())
         while True:
@@ -192,16 +209,17 @@ async def main_loop():
                     display_sextet = not display_sextet
                     status = "ON" if display_sextet else "OFF"
                     console.print(f"[bold yellow]Live sextet display is now {status}[/bold yellow]")
+                    live.update(generate_log_table(), refresh=True)
                     continue
                 if cmd.lower() in ["exit", "quit", "vale"]:
                     break
                 if cmd.strip():
                     if await send_command(cmd.strip()):
+                        console.print(f"[green]Command '{cmd.strip()}' sent successfully[/green]")
                         time.sleep(0.5)
                         live.update(generate_log_table(), refresh=True)
             except (KeyboardInterrupt, asyncio.CancelledError):
                 break
-        
         log_listener_task.cancel()
         sextet_listener_task.cancel()
         console.print("[yellow]Disconnecting... Vale.[/yellow]")
