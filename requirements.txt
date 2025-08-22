@@ -11,6 +11,7 @@ aiohttp
 torch
 torchvision
 torchaudio
+sentence-transformers
 
 # Nostr Client Dependencies
 pynostr
