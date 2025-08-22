@@ -13,6 +13,7 @@ from rich.panel import Panel
 console = Console()
 RELAYS = ['wss://relay.damus.io', 'wss://nostr.wine', 'wss://nos.lol']
 load_dotenv()
+display_updates = False # NEW: Global flag to control display
 
 # --- FUNCTIONS ---
 async def find_server_on_nostr():
@@ -93,14 +94,16 @@ async def state_listener():
                 await ws.send(json.dumps(['REQ', subscription_id, state_filter]))
                 while True:
                     response = await ws.recv()
-                    data = json.loads(response)
-                    if data[0] == 'EVENT':
-                        content = json.loads(data[2]['content'])
-                        sextet = content.get('sextet', {})
-                        panel_content = ""
-                        for key, value in sextet.items():
-                            panel_content += f"[bold cyan]{key.capitalize()}:[/bold cyan] {value:e}\n"
-                        console.print(Panel(panel_content.strip(), title="[yellow]Latium State Update[/yellow]", border_style="dim blue"))
+                    # NEW: Check the display_updates flag before printing
+                    if display_updates:
+                        data = json.loads(response)
+                        if data[0] == 'EVENT':
+                            content = json.loads(data[2]['content'])
+                            sextet = content.get('sextet', {})
+                            panel_content = ""
+                            for key, value in sextet.items():
+                                panel_content += f"[bold cyan]{key.capitalize()}:[/bold cyan] {value:e}\n"
+                            console.print(Panel(panel_content.strip(), title="[yellow]Latium State Update[/yellow]", border_style="dim blue"))
         except Exception as e:
             console.print(f"[red]State listener error: {e}. Reconnecting...[/red]")
             await asyncio.sleep(10)
@@ -123,11 +126,20 @@ async def send_command(command_str: str):
 
 async def main_loop():
     """The main user-facing application loop."""
-    console.print(Panel("[bold green]Nuntius AetherOS Client[/bold green]\nEnter AetherOS commands to send to the Latium server.", border_style="green"))
+    console.print(Panel("[bold green]Nuntius AetherOS Client[/bold green]\nEnter AetherOS commands. Type [bold yellow]LEGERE[/bold yellow] to toggle live state updates.", border_style="green"))
     listener_task = asyncio.create_task(state_listener())
+    global display_updates
     while True:
         try:
             cmd = await asyncio.to_thread(input, "aetheros> ")
+            
+            # NEW: Client-side command to toggle display
+            if cmd.upper() == 'LEGERE':
+                display_updates = not display_updates
+                status = "ON" if display_updates else "OFF"
+                console.print(f"[bold yellow]Live state display is now {status}[/bold yellow]")
+                continue
+
             if cmd.lower() in ["exit", "quit", "vale"]:
                 break
             if cmd.strip():
@@ -136,6 +148,7 @@ async def main_loop():
             break
     listener_task.cancel()
     console.print("[yellow]Disconnecting... Vale.[/yellow]")
+
 
 if __name__ == "__main__":
     if not os.path.exists('config.example.json'):

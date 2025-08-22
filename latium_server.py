@@ -34,16 +34,14 @@ RELAYS = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://nostr.wine']
 private_key_nsec = os.environ.get('NUNTIUS_NSEC', '').strip()
 if not private_key_nsec:
     raise ValueError("FATAL: NUNTIUS_NSEC not set in environment.")
-
 try:
-    hrp, data = bech32_decode(private_key_nsec)
-    privkey_bytes = bytes(convertbits(data, 5, 8, False))
-    private_key = PrivateKey(privkey_bytes)
+    private_key = PrivateKey.from_nsec(private_key_nsec)
     print(f"-> Server running with Nostr pubkey: {private_key.public_key.bech32()}")
 except Exception as e:
     raise ValueError(f"Failed to decode NUNTIUS_NSEC: {e}")
 
 command_queue = queue.Queue()
+
 
 # --- FLASK & SOCKETIO SETUP ---
 app = Flask(__name__, template_folder='web/templates', static_folder='web/static')
@@ -141,38 +139,27 @@ async def broadcast_identity_beacon():
 # --- MAIN SIMULATION LOOP ---
 def main_simulation_loop():
     print("-> Main simulation loop started.")
+    last_broadcast_time = 0
     last_beacon_time = 0
-    # Broadcast once on startup to ensure state is available
-    try:
-        focused_materia = context.get_focused_materia()
-        sextet_data = {k: float(v) for k, v in {
-            'resistance': focused_materia.resistance, 'capacitance': focused_materia.capacitance,
-            'permeability': focused_materia.permeability, 'magnetism': focused_materia.magnetism,
-            'permittivity': focused_materia.permittivity, 'dielectricity': focused_materia.dielectricity
-        }.items()}
-        asyncio.run(broadcast_state_to_nostr(sextet_data))
-    except Exception:
-        pass
-        
     while True:
         try:
-            # Check for and execute commands from the Nostr queue
+            # Check for and execute commands
             try:
                 command = command_queue.get_nowait()
                 asyncio.run(context.execute_command(command))
-                
-                # IMPORTANT CHANGE: Only broadcast state AFTER a command is run
-                focused_materia = context.get_focused_materia()
-                sextet_data = {k: float(v) for k, v in {
-                    'resistance': focused_materia.resistance, 'capacitance': focused_materia.capacitance,
-                    'permeability': focused_materia.permeability, 'magnetism': focused_materia.magnetism,
-                    'permittivity': focused_materia.permittivity, 'dielectricity': focused_materia.dielectricity
-                }.items()}
-                asyncio.run(broadcast_state_to_nostr(sextet_data))
-
             except queue.Empty:
                 pass
             
+            # Broadcast state to Nostr clients every second
+            if time.time() - last_broadcast_time > 1.0:
+                focused_materia = context.get_focused_materia()
+                sextet_data = {k: float(v) for k, v in {
+                    'resistance': focused_materia.resistance, 'capacitance': focused_materia.capacitance, 'permeability': focused_materia.permeability,
+                    'magnetism': focused_materia.magnetism, 'permittivity': focused_materia.permittivity, 'dielectricity': focused_materia.dielectricity
+                }.items()}
+                asyncio.run(broadcast_state_to_nostr(sextet_data))
+                last_broadcast_time = time.time()
+
             # Broadcast the identity beacon once per hour
             if time.time() - last_beacon_time > 3600:
                 asyncio.run(broadcast_identity_beacon())
@@ -181,9 +168,13 @@ def main_simulation_loop():
         except Exception as e:
             print(f"-> Error in main loop: {e}")
         
-        # The web visualizer still gets rapid updates
+        # The web visualizer (if connected) still gets rapid updates
         try:
             focused_materia = context.get_focused_materia()
+            sextet_data = {k: float(v) for k, v in {
+                'resistance': focused_materia.resistance, 'capacitance': focused_materia.capacitance, 'permeability': focused_materia.permeability,
+                'magnetism': focused_materia.magnetism, 'permittivity': focused_materia.permittivity, 'dielectricity': focused_materia.dielectricity
+            }.items()}
             image_grid = focused_materia.grid
             min_val, max_val = np.min(image_grid), np.max(image_grid)
             if max_val > min_val:
@@ -194,8 +185,7 @@ def main_simulation_loop():
             
             socketio.emit('simulation_update', {
                 'grid': grid_b64, 'width': focused_materia.size, 'height': focused_materia.size,
-                'readings': sextet_data,
-                'focus': context.focus
+                'readings': sextet_data, 'focus': context.focus
             })
         except Exception:
             pass
