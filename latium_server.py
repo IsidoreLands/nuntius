@@ -141,35 +141,65 @@ async def broadcast_identity_beacon():
 # --- MAIN SIMULATION LOOP ---
 def main_simulation_loop():
     print("-> Main simulation loop started.")
-    last_broadcast_time = 0
     last_beacon_time = 0
+    # Broadcast once on startup to ensure state is available
+    try:
+        focused_materia = context.get_focused_materia()
+        sextet_data = {k: float(v) for k, v in {
+            'resistance': focused_materia.resistance, 'capacitance': focused_materia.capacitance,
+            'permeability': focused_materia.permeability, 'magnetism': focused_materia.magnetism,
+            'permittivity': focused_materia.permittivity, 'dielectricity': focused_materia.dielectricity
+        }.items()}
+        asyncio.run(broadcast_state_to_nostr(sextet_data))
+    except Exception:
+        pass
+        
     while True:
         try:
+            # Check for and execute commands from the Nostr queue
             try:
                 command = command_queue.get_nowait()
                 asyncio.run(context.execute_command(command))
+                
+                # IMPORTANT CHANGE: Only broadcast state AFTER a command is run
+                focused_materia = context.get_focused_materia()
+                sextet_data = {k: float(v) for k, v in {
+                    'resistance': focused_materia.resistance, 'capacitance': focused_materia.capacitance,
+                    'permeability': focused_materia.permeability, 'magnetism': focused_materia.magnetism,
+                    'permittivity': focused_materia.permittivity, 'dielectricity': focused_materia.dielectricity
+                }.items()}
+                asyncio.run(broadcast_state_to_nostr(sextet_data))
+
             except queue.Empty:
                 pass
-            except Exception as e:
-                print(f"-> Error executing command: {e}")
             
-            focused_materia = context.get_focused_materia()
-            
-            sextet_data = {k: float(v) for k, v in {
-                'resistance': focused_materia.resistance,
-                'capacitance': focused_materia.capacitance,
-                'permeability': focused_materia.permeability,
-                'magnetism': focused_materia.magnetism,
-                'permittivity': focused_materia.permittivity,
-                'dielectricity': focused_materia.dielectricity
-            }.items()}
-
-            if time.time() - last_broadcast_time > 1.0:
-                asyncio.run(broadcast_state_to_nostr(sextet_data))
-                last_broadcast_time = time.time()
+            # Broadcast the identity beacon once per hour
+            if time.time() - last_beacon_time > 3600:
+                asyncio.run(broadcast_identity_beacon())
+                last_beacon_time = time.time()
+                
         except Exception as e:
-            pass # Suppress errors if no materia exists yet
+            print(f"-> Error in main loop: {e}")
         
+        # The web visualizer still gets rapid updates
+        try:
+            focused_materia = context.get_focused_materia()
+            image_grid = focused_materia.grid
+            min_val, max_val = np.min(image_grid), np.max(image_grid)
+            if max_val > min_val:
+                image_grid = (image_grid - min_val) / (max_val - min_val)
+            pixels = (np.array(image_grid) * 255).astype(np.uint8)
+            rgba_image = np.stack([pixels, pixels, pixels, np.full_like(pixels, 255)], axis=-1)
+            grid_b64 = base64.b64encode(rgba_image.tobytes()).decode('utf-8')
+            
+            socketio.emit('simulation_update', {
+                'grid': grid_b64, 'width': focused_materia.size, 'height': focused_materia.size,
+                'readings': sextet_data,
+                'focus': context.focus
+            })
+        except Exception:
+            pass
+
         socketio.sleep(0.1)
 
 @app.route('/')
