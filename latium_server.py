@@ -99,7 +99,7 @@ async def broadcast_state_to_nostr(sextet_data):
             tags=[["t", "ferrocella-v1"]]
         )
         event.sign(private_key.hex())
-        message = json.dumps(['EVENT', event.to_json()])
+        message = json.dumps(['EVENT', event.to_dict()])
         for relay in RELAYS:
             try:
                 async with websockets.connect(relay, open_timeout=5) as ws:
